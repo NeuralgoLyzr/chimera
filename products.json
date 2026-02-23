@@ -1,0 +1,57 @@
+[
+  {
+    "product_id": 501,
+    "name": "Wireless Mouse",
+    "category": "Electronics",
+    "brand": "TechPro",
+    "price": 25.99,
+    "stock_quantity": 150,
+    "supplier": "ElectroSupply Co.",
+    "rating": 4.5,
+    "reviews_count": 342
+  },
+  {
+    "product_id": 502,
+    "name": "Office Chair",
+    "category": "Furniture",
+    "brand": "ComfortSeating",
+    "price": 249.99,
+    "stock_quantity": 45,
+    "supplier": "Furniture Wholesale Inc.",
+    "rating": 4.7,
+    "reviews_count": 189
+  },
+  {
+    "product_id": 503,
+    "name": "Notebook Set",
+    "category": "Stationery",
+    "brand": "WriteWell",
+    "price": 8.99,
+    "stock_quantity": 500,
+    "supplier": "Paper & More",
+    "rating": 4.2,
+    "reviews_count": 523
+  },
+  {
+    "product_id": 504,
+    "name": "Desk Lamp",
+    "category": "Electronics",
+    "brand": "BrightLight",
+    "price": 45.50,
+    "stock_quantity": 89,
+    "supplier": "ElectroSupply Co.",
+    "rating": 4.4,
+    "reviews_count": 267
+  },
+  {
+    "product_id": 505,
+    "name": "Coffee Mug",
+    "category": "Kitchen",
+    "brand": "CeramicPlus",
+    "price": 12.99,
+    "stock_quantity": 300,
+    "supplier": "Kitchen Essentials Ltd.",
+    "rating": 4.6,
+    "reviews_count": 891
+  }
+]
