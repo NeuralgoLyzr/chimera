@@ -1,5 +1,6 @@
 import { SkillsLoader } from './skills.js';
 import { WorkspaceLoader } from './workspace.js';
+import type { Executor } from './executor.js';
 
 export const workspace = new WorkspaceLoader();
 
@@ -76,41 +77,68 @@ function buildRuntimeContext(): string {
 - Date: ${new Date().toISOString().split('T')[0]}`;
 }
 
-export async function buildSystemPrompt(): Promise<string> {
+/**
+ * Build the system prompt.
+ * If an executor is provided, reads workspace files through it (for sandbox/E2B mode).
+ * Otherwise reads from local filesystem (for local mode).
+ */
+export async function buildSystemPrompt(executor?: Executor): Promise<string> {
   const parts: string[] = [];
 
-  // 1. Foundation files (SOUL.md identity, AGENTS.md guidelines, USER.md profile)
-  const foundation = workspace.loadFoundationFiles();
-  if (foundation) parts.push(foundation);
+  if (executor) {
+    // ─── Sandbox mode: read workspace files through the executor ───
+    const foundation = await workspace.loadFoundationFilesAsync(executor);
+    if (foundation) parts.push(foundation);
 
-  // 2. Auto-generated tool descriptions (conditional Supabase stays in code)
-  parts.push(buildToolDescriptions());
+    parts.push(buildToolDescriptions());
 
-  // 3. Supplementary workspace files (TOOLS.md tips)
-  const supplementary = workspace.loadSupplementaryFiles();
-  if (supplementary) parts.push(supplementary);
+    const supplementary = await workspace.loadSupplementaryFilesAsync(executor);
+    if (supplementary) parts.push(supplementary);
 
-  // 4. Skills
-  parts.push(buildSkillsHeader());
-  const loader = new SkillsLoader();
-  const skillsContext = await loader.buildSkillsContext();
-  if (skillsContext) parts.push(skillsContext);
+    parts.push(buildSkillsHeader());
+    const loader = new SkillsLoader();
+    const skillsContext = await loader.buildSkillsContext();
+    if (skillsContext) parts.push(skillsContext);
 
-  // 5. Permanent memory
-  const memory = workspace.loadMemory();
-  if (memory) parts.push(`## Permanent Memory\n\n${memory}`);
+    const memory = await workspace.loadMemoryAsync(executor);
+    if (memory) parts.push(`## Permanent Memory\n\n${memory}`);
 
-  // 6. Journal (today + recent days)
-  workspace.ensureTodayJournal();
-  const todayJournal = workspace.loadTodayJournal();
-  if (todayJournal) parts.push(`## Today's Journal\n\n${todayJournal}`);
+    await workspace.ensureTodayJournalAsync(executor);
+    const todayJournal = await workspace.loadTodayJournalAsync(executor);
+    if (todayJournal) parts.push(`## Today's Journal\n\n${todayJournal}`);
 
-  const recentJournals = workspace.loadRecentJournals(7);
-  if (recentJournals && recentJournals !== todayJournal) {
-    parts.push(`## Recent Journal Entries (last 7 days)\n\n${recentJournals}`);
+    const recentJournals = await workspace.loadRecentJournalsAsync(executor, 7);
+    if (recentJournals && recentJournals !== todayJournal) {
+      parts.push(`## Recent Journal Entries (last 7 days)\n\n${recentJournals}`);
+    }
+  } else {
+    // ─── Local mode: read workspace files from local filesystem ───
+    const foundation = workspace.loadFoundationFiles();
+    if (foundation) parts.push(foundation);
+
+    parts.push(buildToolDescriptions());
+
+    const supplementary = workspace.loadSupplementaryFiles();
+    if (supplementary) parts.push(supplementary);
+
+    parts.push(buildSkillsHeader());
+    const loader = new SkillsLoader();
+    const skillsContext = await loader.buildSkillsContext();
+    if (skillsContext) parts.push(skillsContext);
+
+    const memory = workspace.loadMemory();
+    if (memory) parts.push(`## Permanent Memory\n\n${memory}`);
+
+    workspace.ensureTodayJournal();
+    const todayJournal = workspace.loadTodayJournal();
+    if (todayJournal) parts.push(`## Today's Journal\n\n${todayJournal}`);
+
+    const recentJournals = workspace.loadRecentJournals(7);
+    if (recentJournals && recentJournals !== todayJournal) {
+      parts.push(`## Recent Journal Entries (last 7 days)\n\n${recentJournals}`);
+    }
   }
 
-  // 7. Runtime context
   parts.push(buildRuntimeContext());
 
   return parts.join('\n\n');

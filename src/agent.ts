@@ -14,9 +14,10 @@ export class Agent {
   }
 
   private async getSystemPrompt(): Promise<string> {
-    // Sync memory from sandbox to local before rebuilding prompt
+    // In sandbox mode: git push memory changes, then read workspace from E2B
+    // In local mode: reads from local filesystem directly
     await this.executor.syncMemory();
-    return buildSystemPrompt();
+    return buildSystemPrompt(this.executor);
   }
 
   private formatToolDetail(name: string, input: Record<string, unknown>): string {
@@ -204,6 +205,73 @@ export class Agent {
         const input = block.input as Record<string, unknown>;
         const detail = this.formatToolDetail(block.name, input);
         console.log(`\n  [tool: ${block.name}]${detail}`);
+        const result = await executeTool(
+          block.name,
+          block.input as Record<string, unknown>,
+          this.executor,
+        );
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: result,
+        });
+      }
+
+      this.messages.push({ role: 'user', content: toolResults });
+    }
+  }
+
+  /**
+   * API-driven message handling. Returns the assistant's text response
+   * instead of streaming to stdout. Used by the Next.js API layer.
+   */
+  async sendMessageAPI(userText: string): Promise<string> {
+    this.messages.push({ role: 'user', content: userText });
+    let responseText = '';
+
+    while (true) {
+      this.repairHistory();
+
+      let response: Anthropic.Message;
+      try {
+        const sysPrompt = await this.getSystemPrompt();
+        response = await anthropic.messages.create({
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          system: sysPrompt,
+          messages: this.messages,
+          tools: toolDefinitions,
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (
+          this.messages.length > 0 &&
+          this.messages[this.messages.length - 1].role === 'user'
+        ) {
+          this.messages.pop();
+        }
+        return `Error: ${errMsg}`;
+      }
+
+      this.messages.push({ role: 'assistant', content: response.content });
+
+      // Collect text from this response
+      for (const block of response.content) {
+        if (block.type === 'text') {
+          responseText += block.text;
+        }
+      }
+
+      const toolUseBlocks = response.content.filter(
+        (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
+      );
+
+      if (toolUseBlocks.length === 0) {
+        return responseText;
+      }
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of toolUseBlocks) {
         const result = await executeTool(
           block.name,
           block.input as Record<string, unknown>,

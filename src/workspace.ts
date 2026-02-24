@@ -1,24 +1,17 @@
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Executor } from './executor.js';
 
 const FOUNDATION_FILES = ['SOUL.md', 'AGENTS.md', 'USER.md'];
 const SUPPLEMENTARY_FILES = ['TOOLS.md'];
 const MEMORY_PATH = 'memory/MEMORY.md';
-
-/** All workspace files that should be synced to/from sandbox */
-export const ALL_WORKSPACE_FILES = [
-  'SOUL.md', 'AGENTS.md', 'USER.md', 'TOOLS.md', 'HEARTBEAT.md', 'memory/MEMORY.md',
-];
-
-/** Files that may be modified by the agent and should be synced back from sandbox */
-export const SYNC_BACK_FILES = ['memory/MEMORY.md', 'HEARTBEAT.md'];
 
 function todayDateString(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-const DEFAULT_FILES: Record<string, string> = {
+export const DEFAULT_FILES: Record<string, string> = {
   'SOUL.md': `# Identity
 
 You are Architect, an AI coding agent running in the user's terminal. You help with software engineering tasks by reading, writing, and editing files, running shell commands, searching codebases, and managing git workflows.
@@ -100,9 +93,13 @@ export class WorkspaceLoader {
     return this.workspacePath;
   }
 
+  setWorkspacePath(path: string): void {
+    this.workspacePath = path;
+  }
+
   /**
    * Ensure workspace directory exists with default template files.
-   * Called once at startup. Never overwrites existing files.
+   * Called once at startup for local mode. Never overwrites existing files.
    */
   ensureDefaults(): void {
     if (!existsSync(this.workspacePath)) {
@@ -126,65 +123,47 @@ export class WorkspaceLoader {
       }
     }
 
-    // Create today's journal file if it doesn't exist
     this.ensureTodayJournal();
   }
 
-  /**
-   * Load foundation files (SOUL.md, AGENTS.md, USER.md).
-   * Skips missing or empty files.
-   */
+  // ─── Sync methods (local mode) ─────────────────────────────────────────
+
   loadFoundationFiles(): string {
     const fragments: string[] = [];
     for (const filename of FOUNDATION_FILES) {
-      const content = this.readFile(filename);
+      const content = this.readFileLocal(filename);
       if (content) fragments.push(content);
     }
     return fragments.join('\n\n');
   }
 
-  /**
-   * Load supplementary files (TOOLS.md).
-   * Skips missing or empty files.
-   */
   loadSupplementaryFiles(): string {
     const fragments: string[] = [];
     for (const filename of SUPPLEMENTARY_FILES) {
-      const content = this.readFile(filename);
+      const content = this.readFileLocal(filename);
       if (content) fragments.push(content);
     }
     return fragments.join('\n\n');
   }
 
-  /**
-   * Load permanent memory (memory/MEMORY.md).
-   */
   loadMemory(): string {
-    return this.readFile(MEMORY_PATH) || '';
+    return this.readFileLocal(MEMORY_PATH) || '';
   }
 
-  /**
-   * Ensure today's journal file exists.
-   */
   ensureTodayJournal(): void {
     const date = todayDateString();
     const filepath = join(this.workspacePath, 'journal', `${date}.md`);
     if (!existsSync(filepath)) {
+      mkdirSync(join(this.workspacePath, 'journal'), { recursive: true });
       writeFileSync(filepath, `# Journal — ${date}\n\n`, 'utf-8');
     }
   }
 
-  /**
-   * Load today's journal entry.
-   */
   loadTodayJournal(): string {
     const date = todayDateString();
-    return this.readFile(join('journal', `${date}.md`)) || '';
+    return this.readFileLocal(join('journal', `${date}.md`)) || '';
   }
 
-  /**
-   * Load recent journal entries (last N days including today).
-   */
   loadRecentJournals(daysBack: number = 7): string {
     const journalDir = join(this.workspacePath, 'journal');
     if (!existsSync(journalDir)) return '';
@@ -199,24 +178,99 @@ export class WorkspaceLoader {
 
     const entries: string[] = [];
     for (const file of files) {
-      const content = this.readFile(join('journal', file));
+      const content = this.readFileLocal(join('journal', file));
       if (content) entries.push(content);
     }
     return entries.join('\n\n---\n\n');
   }
 
-  /**
-   * Get the path to today's journal file (for the agent to write to).
-   */
   getTodayJournalPath(): string {
     return join(this.workspacePath, 'journal', `${todayDateString()}.md`);
   }
 
-  private readFile(relativePath: string): string | null {
+  // ─── Async methods (reads through executor — works with E2B sandbox) ───
+
+  async loadFoundationFilesAsync(executor: Executor): Promise<string> {
+    const fragments: string[] = [];
+    for (const filename of FOUNDATION_FILES) {
+      const content = await this.readFileAsync(executor, filename);
+      if (content) fragments.push(content);
+    }
+    return fragments.join('\n\n');
+  }
+
+  async loadSupplementaryFilesAsync(executor: Executor): Promise<string> {
+    const fragments: string[] = [];
+    for (const filename of SUPPLEMENTARY_FILES) {
+      const content = await this.readFileAsync(executor, filename);
+      if (content) fragments.push(content);
+    }
+    return fragments.join('\n\n');
+  }
+
+  async loadMemoryAsync(executor: Executor): Promise<string> {
+    return (await this.readFileAsync(executor, MEMORY_PATH)) || '';
+  }
+
+  async ensureTodayJournalAsync(executor: Executor): Promise<void> {
+    const date = todayDateString();
+    const filepath = join(this.workspacePath, 'journal', `${date}.md`);
+    try {
+      await executor.readFile(filepath);
+    } catch {
+      // File doesn't exist, create it
+      await executor.writeFile(filepath, `# Journal — ${date}\n\n`);
+    }
+  }
+
+  async loadTodayJournalAsync(executor: Executor): Promise<string> {
+    const date = todayDateString();
+    return (await this.readFileAsync(executor, join('journal', `${date}.md`))) || '';
+  }
+
+  async loadRecentJournalsAsync(executor: Executor, daysBack: number = 7): Promise<string> {
+    // List journal files via executor
+    const journalDir = join(this.workspacePath, 'journal');
+    try {
+      const result = await executor.runCommand(
+        `ls ${journalDir}/*.md 2>/dev/null | sort -r | head -${daysBack}`,
+        { timeout: 5_000 },
+      );
+      if (!result.stdout.trim()) return '';
+
+      const files = result.stdout.trim().split('\n');
+      const entries: string[] = [];
+      for (const filepath of files) {
+        try {
+          const content = (await executor.readFile(filepath)).trim();
+          if (content) entries.push(content);
+        } catch {
+          // skip
+        }
+      }
+      return entries.join('\n\n---\n\n');
+    } catch {
+      return '';
+    }
+  }
+
+  // ─── Private helpers ───────────────────────────────────────────────────
+
+  private readFileLocal(relativePath: string): string | null {
     const filepath = join(this.workspacePath, relativePath);
     if (!existsSync(filepath)) return null;
     try {
       const content = readFileSync(filepath, 'utf-8').trim();
+      return content || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async readFileAsync(executor: Executor, relativePath: string): Promise<string | null> {
+    const filepath = join(this.workspacePath, relativePath);
+    try {
+      const content = (await executor.readFile(filepath)).trim();
       return content || null;
     } catch {
       return null;

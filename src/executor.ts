@@ -10,10 +10,8 @@ import {
   rename,
   chmod,
 } from 'node:fs/promises';
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
-import { resolve, dirname, basename, join } from 'node:path';
+import { resolve, dirname, basename } from 'node:path';
 import { glob } from 'glob';
-import { ALL_WORKSPACE_FILES, SYNC_BACK_FILES } from './workspace.js';
 
 export interface FileInfo {
   name: string;
@@ -217,14 +215,28 @@ export class LocalExecutor implements Executor {
 
 // ─── Sandbox Executor (E2B) ─────────────────────────────────────────────────
 
+export interface SandboxConfig {
+  /** GitHub repo to clone as workspace (e.g. "chimera-agents/ws-user-agent") */
+  workspaceRepo?: string;
+  /** GitHub PAT for auth inside E2B */
+  githubToken?: string;
+}
+
 export class SandboxExecutor implements Executor {
   private sandbox: Sandbox | null = null;
   private initPromise: Promise<Sandbox> | null = null;
   private cwd = '/home/user';
-  private workspacePath: string;
+  private workspaceDir = '/home/user/workspace';
+  private workspaceRepo: string | null;
+  private githubToken: string | null;
 
-  constructor(workspacePath?: string) {
-    this.workspacePath = workspacePath || join(process.cwd(), 'workspace');
+  constructor(config?: SandboxConfig) {
+    this.workspaceRepo = config?.workspaceRepo || process.env.WORKSPACE_REPO || null;
+    this.githubToken = config?.githubToken || process.env.GITHUB_PAT || null;
+  }
+
+  getWorkspaceDir(): string {
+    return this.workspaceDir;
   }
 
   private ensureSandbox(): Promise<Sandbox> {
@@ -235,59 +247,52 @@ export class SandboxExecutor implements Executor {
       console.log('\n  Starting E2B sandbox...');
       this.sandbox = await Sandbox.create({ timeoutMs: 300_000 });
       console.log(`  Sandbox ready (id: ${this.sandbox.sandboxId})`);
-      await this.syncWorkspaceToSandbox();
+      await this.cloneWorkspace();
       return this.sandbox;
     })();
 
     return this.initPromise;
   }
 
-  /** Upload local workspace files into the sandbox */
-  private async syncWorkspaceToSandbox(): Promise<void> {
+  /** Clone the workspace GitHub repo into the sandbox */
+  private async cloneWorkspace(): Promise<void> {
     if (!this.sandbox) return;
-    const remoteDir = `${this.cwd}/workspace`;
-    await this.sandbox.commands.run(`mkdir -p ${remoteDir}/memory ${remoteDir}/journal`);
 
-    let count = 0;
-    // Sync static workspace files
-    for (const file of ALL_WORKSPACE_FILES) {
-      const localPath = join(this.workspacePath, file);
-      if (!existsSync(localPath)) continue;
-      const content = readFileSync(localPath, 'utf-8');
-      await this.sandbox.files.write(`${remoteDir}/${file}`, content);
-      count++;
-    }
-    // Sync journal files
-    const journalDir = join(this.workspacePath, 'journal');
-    if (existsSync(journalDir)) {
-      for (const file of readdirSync(journalDir).filter(f => f.endsWith('.md'))) {
-        const content = readFileSync(join(journalDir, file), 'utf-8');
-        await this.sandbox.files.write(`${remoteDir}/journal/${file}`, content);
-        count++;
+    if (this.workspaceRepo && this.githubToken) {
+      const cloneUrl = `https://x-access-token:${this.githubToken}@github.com/${this.workspaceRepo}.git`;
+      console.log(`  Cloning workspace: ${this.workspaceRepo}`);
+      const result = await this.sandbox.commands.run(
+        `git clone ${cloneUrl} ${this.workspaceDir}`,
+        { timeoutMs: 30_000 },
+      );
+      if (result.exitCode !== 0) {
+        console.error(`  Clone failed: ${result.stderr}`);
+        // Fall back to empty workspace
+        await this.sandbox.commands.run(`mkdir -p ${this.workspaceDir}/memory ${this.workspaceDir}/journal`);
+      } else {
+        // Configure git for commits inside sandbox
+        await this.sandbox.commands.run(
+          `cd ${this.workspaceDir} && git config user.email "chimera@agent" && git config user.name "Chimera Agent"`,
+        );
+        console.log(`  Workspace cloned successfully\n`);
       }
+    } else {
+      // No repo configured — create empty workspace structure
+      await this.sandbox.commands.run(`mkdir -p ${this.workspaceDir}/memory ${this.workspaceDir}/journal`);
+      console.log(`  No workspace repo configured, using empty workspace\n`);
     }
-    console.log(`  Synced ${count} workspace files → sandbox\n`);
   }
 
-  /** Download modified workspace files from the sandbox back to local */
-  private async syncWorkspaceFromSandbox(): Promise<void> {
-    if (!this.sandbox) return;
-    const remoteDir = `${this.cwd}/workspace`;
+  /** Commit and push workspace changes to GitHub */
+  private async gitPush(message: string): Promise<void> {
+    if (!this.sandbox || !this.workspaceRepo || !this.githubToken) return;
 
-    let count = 0;
-    for (const file of SYNC_BACK_FILES) {
-      try {
-        const content = await this.sandbox.files.read(`${remoteDir}/${file}`);
-        const localPath = join(this.workspacePath, file);
-        mkdirSync(dirname(localPath), { recursive: true });
-        writeFileSync(localPath, content, 'utf-8');
-        count++;
-      } catch {
-        // File may not exist in sandbox, skip
-      }
-    }
-    if (count > 0) {
-      console.log(`  Synced ${count} workspace files ← sandbox`);
+    const result = await this.sandbox.commands.run(
+      `cd ${this.workspaceDir} && git add -A && git diff --cached --quiet || git commit -m "${message}" && git push`,
+      { timeoutMs: 30_000 },
+    );
+    if (result.exitCode !== 0 && result.stderr && !result.stderr.includes('nothing to commit')) {
+      console.error(`  Git push failed: ${result.stderr}`);
     }
   }
 
@@ -443,52 +448,13 @@ export class SandboxExecutor implements Executor {
   }
 
   async syncMemory(): Promise<void> {
-    if (!this.sandbox) return;
-    const remoteDir = `${this.cwd}/workspace`;
-    // Sync back memory + heartbeat
-    for (const file of SYNC_BACK_FILES) {
-      try {
-        const content = await this.sandbox.files.read(`${remoteDir}/${file}`);
-        const localPath = join(this.workspacePath, file);
-        mkdirSync(dirname(localPath), { recursive: true });
-        writeFileSync(localPath, content, 'utf-8');
-      } catch {
-        // File may not exist in sandbox yet
-      }
-    }
-    // Sync back journal files
-    await this.syncJournalFromSandbox();
-  }
-
-  private async syncJournalFromSandbox(): Promise<void> {
-    if (!this.sandbox) return;
-    const remoteJournalDir = `${this.cwd}/workspace/journal`;
-    try {
-      const result = await this.sandbox.commands.run(
-        `ls ${remoteJournalDir}/*.md 2>/dev/null || true`,
-        { timeoutMs: 5_000 },
-      );
-      if (!result.stdout.trim()) return;
-      const files = result.stdout.trim().split('\n');
-      const localJournalDir = join(this.workspacePath, 'journal');
-      mkdirSync(localJournalDir, { recursive: true });
-      for (const remotePath of files) {
-        try {
-          const content = await this.sandbox.files.read(remotePath);
-          const filename = basename(remotePath);
-          writeFileSync(join(localJournalDir, filename), content, 'utf-8');
-        } catch {
-          // skip
-        }
-      }
-    } catch {
-      // journal dir may not exist
-    }
+    // Commit and push workspace changes (memory, journal, heartbeat) to GitHub
+    await this.gitPush('auto: sync memory');
   }
 
   async destroy(): Promise<void> {
     if (this.sandbox) {
-      await this.syncWorkspaceFromSandbox();
+      await this.gitPush('auto: session end');
       console.log('  Shutting down sandbox...');
       await this.sandbox.kill();
       this.sandbox = null;
@@ -498,14 +464,14 @@ export class SandboxExecutor implements Executor {
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
-export function createExecutor(useSandbox: boolean): Executor {
+export function createExecutor(useSandbox: boolean, sandboxConfig?: SandboxConfig): Executor {
   if (useSandbox) {
     if (!process.env.E2B_API_KEY) {
       console.error('Error: E2B_API_KEY is required for sandbox mode.');
       console.error('Set it in your .env file or environment, or use --local to run locally.');
       process.exit(1);
     }
-    return new SandboxExecutor();
+    return new SandboxExecutor(sandboxConfig);
   }
   return new LocalExecutor();
 }
